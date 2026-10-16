@@ -7,7 +7,7 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'deepchat-data.json');
-const GIFT_COMMISSION = 0.30; // 30% комиссия при обмене
+const GIFT_COMMISSION = 0.30;
 
 const DEFAULT_CODES = {
   'DEEP-DEV-9K2X-7M3P': { name: 'Разработчик', isAdmin: true, color: '#2AABEE', username: 'admin' },
@@ -86,7 +86,7 @@ app.post('/api/login', (req, res) => {
   const u = ensureUser(code);
   u.lastSeen = Date.now();
   saveState();
-  res.json({ ok:true, token, user:u, gifts:GIFTS, commission: GIFT_COMMISSION });
+  res.json({ ok:true, token, user:u, gifts:GIFTS, commission:GIFT_COMMISSION });
 });
 
 function auth(req, res, next){
@@ -105,13 +105,13 @@ function publicUser(u, viewer){
   const isAdmin = viewerUser && viewerUser.isAdmin;
   const showPrivate = isSelf || isAdmin;
   return {
-    code: showPrivate ? u.code : null,
-    codeHidden: !showPrivate,
-    name:u.name, username:u.username, color:u.color,
-    avatar:u.avatar, banner:u.banner, isAdmin:u.isAdmin, phone:u.phone,
+    code: u.code,
+    codeVisible: showPrivate,
+    name: u.name, username: u.username, color: u.color,
+    avatar: u.avatar, banner: u.banner, isAdmin: u.isAdmin, phone: u.phone,
     stars: showPrivate ? u.stars : null,
     showStars: showPrivate,
-    online:isOnline(u.code), lastSeen:u.lastSeen,
+    online: isOnline(u.code), lastSeen: u.lastSeen,
     blockedByMe: (viewerUser && (viewerUser.blocked || []) || []).includes(u.code),
     blockedMe: (u.blocked || []).includes(viewer)
   };
@@ -240,33 +240,17 @@ app.post('/api/gifts/send', auth, (req, res) => {
   res.json({ ok:true, user: publicUser(from, req.code) });
 });
 
-// === ОБМЕН ПОДАРКОВ НА ЗВЁЗДЫ ===
 app.post('/api/gifts/exchange', auth, (req, res) => {
-  const { giftInstanceId, count } = req.body || {};
+  const { giftInstanceId } = req.body || {};
   const me = state.users[req.code];
   if(!me) return res.json({ ok:false });
-
-  // Находим все подарки пользователя с этим giftId
-  let candidates;
-  if(giftInstanceId){
-    candidates = state.gifts.filter(g => g.id === giftInstanceId && g.to === req.code);
-  } else {
-    return res.json({ ok:false, error:'Не указан подарок' });
-  }
-  if(!candidates.length) return res.json({ ok:false, error:'Подарок не найден' });
-
-  const gift = candidates[0];
+  const gift = state.gifts.find(g => g.id === giftInstanceId && g.to === req.code);
+  if(!gift) return res.json({ ok:false, error:'Подарок не найден' });
   const giftDef = GIFTS.find(x => x.id === gift.giftId);
   if(!giftDef) return res.json({ ok:false });
-
   const returnAmount = Math.floor(giftDef.price * (1 - GIFT_COMMISSION));
-
-  // Удаляем подарок
   state.gifts = state.gifts.filter(g => g.id !== gift.id);
-
-  // Начисляем звёзды
   if(me.stars !== 'inf') me.stars = (me.stars || 0) + returnAmount;
-
   saveState();
   broadcast({ type:'user_update', user: publicUser(me, me.code) });
   broadcast({ type:'user_update_public', user: publicUser(me, '') });
