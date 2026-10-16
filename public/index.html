@@ -561,6 +561,7 @@ $('#chatList').addEventListener('click', function(e){
   openChat(item.dataset.id);
 });
 function openChat(id){
+  if(!id || id === 'null' || id === 'undefined') { toast('Ошибка: неверный ID'); return; }
   activeChat = id;
   document.body.classList.add('chat-open');
   renderList(); renderHeader();
@@ -710,7 +711,20 @@ function onNewMessage(m){ appendMsg(m); }
 function onMessageEdit(m){ var el = document.querySelector('[data-mid="' + m.id + '"]'); if(el){ var txt = el.querySelector('.msg-text'); if(txt) txt.textContent = m.text; } }
 function onMessageDelete(id){ var el = document.querySelector('[data-mid="' + id + '"]'); if(el){ el.style.transition = 'all .25s'; el.style.opacity = '0'; el.style.transform = 'scale(.7)'; setTimeout(function(){ el.remove(); }, 250); } }
 function onPresence(code, online){ var u = users.find(function(x){ return x.code === code; }); if(u){ u.online = online; if(!online) u.lastSeen = Date.now(); renderList(); if(activeChat === code) renderHeader(); } }
-function onUserUpdate(u){ var i = users.findIndex(function(x){ return x.code === u.code; }); if(i >= 0) users[i] = Object.assign({}, users[i], u); else users.push(u); if(u.code === me.code) me = Object.assign({}, me, u); renderList(); if(activeChat === u.code) renderHeader(); }
+function onUserUpdate(u){
+  var i = users.findIndex(function(x){ return x.code === u.code; });
+  if(i >= 0){
+    if(u.codeVisible === false && users[i].codeVisible === true) {
+      u.codeVisible = users[i].codeVisible;
+    }
+    users[i] = Object.assign({}, users[i], u);
+  } else {
+    users.push(u);
+  }
+  if(u.code === me.code) me = Object.assign({}, me, u);
+  renderList();
+  if(activeChat === u.code) renderHeader();
+}
 function onTyping(from, to){ if(from !== activeChat) return; var t = document.getElementById('typingIndicator'); if(!t){ t = document.createElement('div'); t.className = 'msg in typing'; t.id = 'typingIndicator'; t.innerHTML = '<div class="bubble"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>'; $('#messages').appendChild(t); scrollBottom(); } clearTimeout(t._to); t._to = setTimeout(function(){ t.remove(); }, 3000); }
 
 var msgInput = $('#msgInput');
@@ -888,7 +902,7 @@ function openProfile(code, silent){
     '<div class="prof-main">' +
       '<div class="prof-avatar-wrap"><div class="prof-avatar" style="' + avatarStyle + '">' + avatarContent + '</div><div class="prof-stars-badge">⭐ ' + starsStr + '</div></div>' +
       '<div class="prof-names"><div class="prof-name">' + esc(u.name) + '</div><div class="prof-username">@' + esc(u.username) + '</div><div class="prof-status">' + onlineStatus + '</div></div>' +
-      '<div class="prof-info-cards"><div class="prof-info-card"><div class="ic-label">Номер</div><div class="ic-val">' + esc(u.phone || '—') + '</div></div><div class="prof-info-card"><div class="ic-label">ID</div><div class="ic-val">' + (u.code ? esc(u.code) : '🔒 Скрыт') + '</div></div></div>' +
+      '<div class="prof-info-cards"><div class="prof-info-card"><div class="ic-label">Номер</div><div class="ic-val">' + esc(u.phone || '—') + '</div></div><div class="prof-info-card"><div class="ic-label">ID</div><div class="ic-val">' + (u.codeVisible ? esc(u.code) : '🔒 Скрыт') + '</div></div></div>' +
       '<div class="prof-actions">' + actionsHtml + '</div>' +
       '<div class="prof-tabs"><div class="prof-tab' + (profileTab === 'posts' ? ' active' : '') + '" data-tab="posts">📝 Публикации</div><div class="prof-tab' + (profileTab === 'gifts' ? ' active' : '') + '" data-tab="gifts">🎁 Подарки</div></div>' +
       '<div class="prof-tab-content" id="profContent"><div class="prof-empty">Загрузка…</div></div></div>';
@@ -933,7 +947,6 @@ function loadProfileContent(code, isMe){
       if(r.commission) GIFT_COMMISSION = r.commission;
       var g = r.gifts || [];
       if(!g.length){ el.innerHTML = '<div class="prof-empty">' + (isMe ? 'У вас нет подарков' : 'Подарков нет') + '</div>'; return; }
-      // Группируем по giftId
       var grouped = {};
       g.forEach(function(x){
         if(!grouped[x.giftId]) grouped[x.giftId] = { gift: x.gift, instances: [], froms: [] };
@@ -952,8 +965,7 @@ function loadProfileContent(code, isMe){
         el.querySelectorAll('.gift-cell').forEach(function(cell){
           cell.onclick = function(){
             var giftId = cell.dataset.gift;
-            var count = Number(cell.dataset.count);
-            openGiftExchange(code, giftId, count);
+            openGiftExchange(code, giftId);
           };
         });
       }
@@ -961,9 +973,7 @@ function loadProfileContent(code, isMe){
   }
 }
 
-// ОБМЕН ПОДАРКА
-function openGiftExchange(ownerCode, giftId, count){
-  // Загружаем список экземпляров этого подарка у меня
+function openGiftExchange(ownerCode, giftId){
   api('/gifts/' + encodeURIComponent(ownerCode)).then(function(r){
     var all = (r.gifts || []).filter(function(g){ return g.giftId === giftId; });
     if(!all.length){ toast('Подарков нет'); return; }
@@ -971,8 +981,6 @@ function openGiftExchange(ownerCode, giftId, count){
     var unitReturn = Math.floor(giftDef.price * (1 - GIFT_COMMISSION));
     var commissionAmount = giftDef.price - unitReturn;
     var totalReturn = unitReturn * all.length;
-    var totalCommission = commissionAmount * all.length;
-
     var ov = document.createElement('div'); ov.className = 'modal-bg';
     ov.innerHTML = '<div class="modal" style="max-width:420px">' +
       '<h3>Обменять подарок</h3>' +
@@ -992,10 +1000,10 @@ function openGiftExchange(ownerCode, giftId, count){
     ov.addEventListener('click', function(e){ if(e.target === ov) ov.remove(); });
     ov.querySelector('#exCancel').onclick = function(){ ov.remove(); };
     var countInput = ov.querySelector('#exCount');
-    var priceRow = ov.querySelector('.row:last-child b');
+    var totalRow = ov.querySelector('.row:last-child b');
     countInput.addEventListener('input', function(){
       var n = Math.max(1, Math.min(all.length, Number(countInput.value) || 1));
-      priceRow.textContent = '⭐ ' + (unitReturn * n);
+      totalRow.textContent = '⭐ ' + (unitReturn * n);
     });
     ov.querySelector('#exConfirm').onclick = function(){
       var n = Math.max(1, Math.min(all.length, Number(countInput.value) || 1));
