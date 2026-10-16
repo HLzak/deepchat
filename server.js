@@ -86,7 +86,11 @@ function myChats(code){ return Object.values(state.chats).filter(c=>c.type==='ch
 
 app.get('/api/users', auth, (req,res)=>{
   const list = Object.values(state.users).map(u=>({ code:u.code, name:u.name, username:u.username, color:u.color, avatar:u.avatar, isAdmin:u.isAdmin, phone:u.phone, stars:u.stars, online:isOnline(u.code), lastSeen:u.lastSeen }));
-  res.json({ ok:true, users:list, me:state.users[req.code], chats:myChats(req.code), gifts:GIFTS });
+  const stories = state.posts.filter(p=>p.media).slice(-40).reverse().map(p=>{
+    const a = state.users[p.author];
+    return { id:p.id, author:p.author, authorName:a?a.name:'?', authorAvatar:a?a.avatar:null, authorColor:a?a.color:'#2AABEE', media:p.media, mediaType:p.mediaType, t:p.t };
+  });
+  res.json({ ok:true, users:list, me:state.users[req.code], chats:myChats(req.code), gifts:GIFTS, stories });
 });
 
 app.get('/api/messages/:withId', auth, (req,res)=>{
@@ -117,7 +121,6 @@ app.post('/api/profile', auth, (req,res)=>{
 
 app.post('/api/logout', auth, (req,res)=>{ delete state.sessions[req.headers['x-token']]; saveState(); res.json({ ok:true }); });
 
-// GIFTS
 app.post('/api/gifts/send', auth, (req,res)=>{
   const { to, giftId } = req.body || {};
   const from = state.users[req.code], toUser = state.users[to];
@@ -137,20 +140,22 @@ app.post('/api/gifts/send', auth, (req,res)=>{
 });
 
 app.get('/api/gifts/:code', auth, (req,res)=>{
-  res.json({ ok:true, gifts:state.gifts.filter(g=>g.to===req.params.code).map(g=>({...g, gift:GIFTS.find(x=>x.id===g.giftId), fromUser: state.users[g.from] ? { name:state.users[g.from].name, username:state.users[g.from].username, avatar:state.users[g.from].avatar, color:state.users[g.from].color } : null })) });
+  res.json({ ok:true, gifts:state.gifts.filter(g=>g.to===req.params.code).map(g=>{
+    const fu = state.users[g.from];
+    return { ...g, gift:GIFTS.find(x=>x.id===g.giftId), fromUser: fu ? { code:fu.code, name:fu.name, username:fu.username, avatar:fu.avatar, color:fu.color } : null };
+  }) });
 });
 
-// POSTS
 app.get('/api/posts/:code', auth, (req,res)=>{
   const posts = state.posts.filter(p=>p.author===req.params.code).slice(-100).reverse();
   res.json({ ok:true, posts });
 });
 
 app.post('/api/posts', auth, (req,res)=>{
-  const { text, media, mediaType } = req.body || {};
+  const { text, media, mediaType, poster } = req.body || {};
   if(!text && !media) return res.json({ ok:false, error:'Пусто' });
   if(media && (typeof media!=='string' || media.length>2000000)) return res.json({ ok:false, error:'Слишком большое' });
-  const p = { id:crypto.randomBytes(8).toString('hex'), author:req.code, text:text?String(text).slice(0,2000):'', media:media||null, mediaType:mediaType||null, t:Date.now(), likes:[] };
+  const p = { id:crypto.randomBytes(8).toString('hex'), author:req.code, text:text?String(text).slice(0,2000):'', media:media||null, mediaType:mediaType||null, poster:poster||null, t:Date.now(), likes:[] };
   state.posts.push(p);
   if(state.posts.length>5000) state.posts = state.posts.slice(-2500);
   saveState();
@@ -179,7 +184,6 @@ app.post('/api/posts/:id/like', auth, (req,res)=>{
   res.json({ ok:true, post:p });
 });
 
-// CHATS
 app.post('/api/chats', auth, (req,res)=>{
   const { type, name, avatar, members } = req.body || {};
   if(!name || !name.trim()) return res.json({ ok:false, error:'Введите название' });
@@ -222,7 +226,6 @@ app.delete('/api/chats/:id', auth, (req,res)=>{
   saveState(); broadcast({ type:'chats_changed' }); res.json({ ok:true });
 });
 
-// ADMIN
 app.get('/api/admin/codes', auth, (req,res)=>{
   if(!state.users[req.code]?.isAdmin) return res.status(403).json({ ok:false });
   res.json({ ok:true, codes:state.codes, users:state.users, messageCount:state.messages.length, chats:Object.values(state.chats), giftsCount:state.gifts.length });
@@ -269,7 +272,6 @@ app.post('/api/admin/clear', auth, (req,res)=>{
   state.messages = []; saveState(); res.json({ ok:true });
 });
 
-// WEBSOCKET
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 5*1024*1024 });
 const clients = new Map();
@@ -292,10 +294,10 @@ wss.on('connection', (ws)=>{
     }
     if(!code) return;
     if(msg.type==='send'){
-      const { to, text, media, mediaType, duration } = msg;
+      const { to, text, media, mediaType, duration, poster } = msg;
       if(!to) return;
       if(media && (typeof media!=='string' || media.length>3000000)) return;
-      const m = { id:crypto.randomBytes(8).toString('hex'), from:code, to, text:text?String(text).slice(0,4000):'', media:media||null, mediaType:mediaType||null, duration:duration||0, type:media?mediaType:'text', t:Date.now() };
+      const m = { id:crypto.randomBytes(8).toString('hex'), from:code, to, text:text?String(text).slice(0,4000):'', media:media||null, mediaType:mediaType||null, poster:poster||null, duration:duration||0, type:media?mediaType:'text', t:Date.now() };
       if(state.chats[to]){
         const ch = state.chats[to];
         if(ch.type==='channel' && ch.creator!==code) return;
