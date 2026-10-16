@@ -15,16 +15,16 @@ const DEFAULT_CODES = {
 };
 
 const GIFTS = [
-  { id:'rose',    emoji:'🌹', name:'Роза',         price:5   },
-  { id:'heart',   emoji:'❤️', name:'Сердце',        price:10  },
-  { id:'cake',    emoji:'🎂', name:'Торт',          price:25  },
-  { id:'bear',    emoji:'🧸', name:'Мишка',         price:50  },
-  { id:'ring',    emoji:'💍', name:'Кольцо',        price:100 },
-  { id:'rocket',  emoji:'🚀', name:'Ракета',        price:150 },
-  { id:'diamond', emoji:'💎', name:'Алмаз',         price:250 },
-  { id:'crown',   emoji:'👑', name:'Корона',        price:500 },
-  { id:'trophy',  emoji:'🏆', name:'Кубок',         price:750 },
-  { id:'star',    emoji:'⭐', name:'Звезда',        price:1000}
+  { id:'rose',    emoji:'🌹', name:'Роза',   price:5   },
+  { id:'heart',   emoji:'❤️', name:'Сердце',  price:10  },
+  { id:'cake',    emoji:'🎂', name:'Торт',    price:25  },
+  { id:'bear',    emoji:'🧸', name:'Мишка',   price:50  },
+  { id:'ring',    emoji:'💍', name:'Кольцо',  price:100 },
+  { id:'rocket',  emoji:'🚀', name:'Ракета',  price:150 },
+  { id:'diamond', emoji:'💎', name:'Алмаз',   price:250 },
+  { id:'crown',   emoji:'👑', name:'Корона',  price:500 },
+  { id:'trophy',  emoji:'🏆', name:'Кубок',   price:750 },
+  { id:'star',    emoji:'⭐', name:'Звезда',  price:1000}
 ];
 
 let state = { users: {}, messages: [], sessions: {}, codes: {}, chats: {}, gifts: [] };
@@ -33,6 +33,24 @@ function generatePhone(){
   let n = '';
   for(let i=0;i<8;i++) n += Math.floor(Math.random()*10);
   return '+888 ' + n.slice(0,4) + ' ' + n.slice(4,8);
+}
+
+const RANDOM_COLORS = ['#2AABEE','#7bc862','#e17076','#65aadd','#a695e7','#ee7aae','#ffb84d','#4dc9b0'];
+
+function ensureUser(code){
+  if(state.users[code]) return state.users[code];
+  const c = state.codes[code];
+  if(!c) return null;
+  let un = c.username || 'user' + code.slice(-4).toLowerCase();
+  while(Object.values(state.users).some(x => x.username === un && x.code !== code)) un = un + '1';
+  state.users[code] = {
+    code, name: c.name || 'Пользователь', username: un,
+    color: c.color || RANDOM_COLORS[Math.floor(Math.random()*RANDOM_COLORS.length)],
+    avatar: null, phone: generatePhone(),
+    isAdmin: !!c.isAdmin, stars: c.isAdmin ? 'inf' : 0,
+    createdAt: Date.now(), lastSeen: 0
+  };
+  return state.users[code];
 }
 
 function loadState(){
@@ -46,16 +64,10 @@ function loadState(){
   if(!state.messages) state.messages = [];
   if(!state.users) state.users = {};
   if(!state.gifts) state.gifts = [];
-  for(const [code, u] of Object.entries(state.users)){
-    if(!u.username){
-      const base = (u.name || 'user').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0,10) || 'user';
-      let un = base, i = 1;
-      while(Object.values(state.users).some(x => x.username === un)) { un = base + i++; }
-      u.username = un;
-    }
-    if(!u.phone) u.phone = generatePhone();
-    if(u.avatar === undefined) u.avatar = null;
-    if(u.stars === undefined) u.stars = u.isAdmin ? 'inf' : 0;
+
+  // КЛЮЧЕВОЕ: создаём профиль для КАЖДОГО кода сразу
+  for(const code of Object.keys(state.codes)){
+    ensureUser(code);
   }
   saveState();
 }
@@ -68,8 +80,6 @@ const app = express();
 app.use(express.json({ limit: '4mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-const RANDOM_COLORS = ['#2AABEE','#7bc862','#e17076','#65aadd','#a695e7','#ee7aae','#ffb84d','#4dc9b0'];
-
 app.post('/api/login', (req, res) => {
   const { code } = req.body || {};
   if(!code || !state.codes[code]) return res.json({ ok: false, error: 'Неверный код' });
@@ -77,12 +87,10 @@ app.post('/api/login', (req, res) => {
   if(c.banned) return res.json({ ok: false, error: 'Код заблокирован' });
   const token = crypto.randomBytes(24).toString('hex');
   state.sessions[token] = code;
-  if(!state.users[code]){
-    state.users[code] = { code, name: c.name, username: c.username || 'user'+Math.floor(Math.random()*1000), color: c.color, avatar: null, phone: generatePhone(), isAdmin: c.isAdmin, stars: c.isAdmin ? 'inf' : 0, createdAt: Date.now(), lastSeen: Date.now() };
-  }
-  state.users[code].lastSeen = Date.now();
+  const u = ensureUser(code);
+  u.lastSeen = Date.now();
   saveState();
-  res.json({ ok: true, token, user: state.users[code], gifts: GIFTS });
+  res.json({ ok: true, token, user: u, gifts: GIFTS });
 });
 
 function auth(req, res, next){
@@ -90,6 +98,11 @@ function auth(req, res, next){
   if(!token || !state.sessions[token]) return res.status(401).json({ ok: false });
   req.code = state.sessions[token];
   next();
+}
+
+function isOnline(code){
+  for(const c of clients.values()) if(c === code) return true;
+  return false;
 }
 
 function myChats(code){
@@ -102,7 +115,8 @@ function myChats(code){
 app.get('/api/users', auth, (req, res) => {
   const list = Object.values(state.users).map(u => ({
     code: u.code, name: u.name, username: u.username, color: u.color, avatar: u.avatar,
-    isAdmin: u.isAdmin, phone: u.phone, stars: u.stars, online: isOnline(u.code), lastSeen: u.lastSeen
+    isAdmin: u.isAdmin, phone: u.phone, stars: u.stars,
+    online: isOnline(u.code), lastSeen: u.lastSeen
   }));
   res.json({ ok: true, users: list, me: state.users[req.code], chats: myChats(req.code), gifts: GIFTS });
 });
@@ -112,13 +126,11 @@ app.get('/api/messages/:withId', auth, (req, res) => {
   if(state.chats[other]){
     const ch = state.chats[other];
     if(ch.type === 'group' && ch.creator !== me && !(ch.members||[]).includes(me)) return res.status(403).json({ ok: false });
-    const msgs = state.messages.filter(m => m.to === other).slice(-500);
-    return res.json({ ok: true, messages: msgs });
+    return res.json({ ok: true, messages: state.messages.filter(m => m.to === other).slice(-500) });
   }
-  const msgs = state.messages.filter(m =>
+  return res.json({ ok: true, messages: state.messages.filter(m =>
     (m.from === me && m.to === other) || (m.from === other && m.to === me)
-  ).slice(-500);
-  res.json({ ok: true, messages: msgs });
+  ).slice(-500) });
 });
 
 app.post('/api/profile', auth, (req, res) => {
@@ -150,16 +162,13 @@ app.post('/api/logout', auth, (req, res) => {
 // --- Gifts ---
 app.post('/api/gifts/send', auth, (req, res) => {
   const { to, giftId } = req.body || {};
-  const from = state.users[req.code];
-  const toUser = state.users[to];
+  const from = state.users[req.code], toUser = state.users[to];
   const gift = GIFTS.find(g => g.id === giftId);
   if(!gift || !toUser) return res.json({ ok: false, error: 'Неверный подарок' });
   if(from.stars !== 'inf' && from.stars < gift.price) return res.json({ ok: false, error: 'Недостаточно звёзд' });
   if(from.stars !== 'inf') from.stars -= gift.price;
-  const rec = { id: crypto.randomBytes(6).toString('hex'), giftId, from: req.code, to, t: Date.now() };
-  state.gifts.push(rec);
-  // Отправим как системное сообщение в чат
-  const m = { id: crypto.randomBytes(8).toString('hex'), from: req.code, to, type: 'gift', gift: gift, t: Date.now() };
+  state.gifts.push({ id: crypto.randomBytes(6).toString('hex'), giftId, from: req.code, to, t: Date.now() });
+  const m = { id: crypto.randomBytes(8).toString('hex'), from: req.code, to, type: 'gift', gift, t: Date.now() };
   state.messages.push(m);
   saveState();
   const payload = JSON.stringify({ type: 'message', message: m });
@@ -168,7 +177,7 @@ app.post('/api/gifts/send', auth, (req, res) => {
   }
   broadcast({ type: 'user_update', user: from });
   broadcast({ type: 'user_update', user: toUser });
-  res.json({ ok: true, user: from, giftsCount: state.gifts.filter(g => g.to === to).length });
+  res.json({ ok: true, user: from });
 });
 
 app.get('/api/gifts/:code', auth, (req, res) => {
@@ -187,6 +196,7 @@ app.post('/api/admin/codes', auth, (req, res) => {
   const code = 'DEEP-' + crypto.randomBytes(2).toString('hex').toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase();
   const username = 'user' + crypto.randomBytes(2).toString('hex');
   state.codes[code] = { name: name || 'Новый', isAdmin: !!isAdmin, color: RANDOM_COLORS[Math.floor(Math.random()*RANDOM_COLORS.length)], username, createdAt: Date.now(), banned: false };
+  ensureUser(code); // сразу создаём профиль
   saveState();
   res.json({ ok: true, code });
 });
@@ -202,8 +212,7 @@ app.post('/api/admin/delete', auth, (req, res) => {
   if(!state.users[req.code]?.isAdmin) return res.status(403).json({ ok:false });
   const { code } = req.body || {};
   if(code === req.code) return res.json({ ok: false, error: 'Нельзя удалить свой код' });
-  delete state.codes[code];
-  delete state.users[code];
+  delete state.codes[code]; delete state.users[code];
   for(const [t, c] of Object.entries(state.sessions)) if(c === code) delete state.sessions[t];
   saveState();
   res.json({ ok: true });
@@ -233,13 +242,10 @@ app.post('/api/chats', auth, (req, res) => {
   if(!name || !name.trim()) return res.json({ ok: false, error: 'Введите название' });
   if(type !== 'channel' && type !== 'group') return res.json({ ok: false, error: 'Неверный тип' });
   const id = (type === 'channel' ? 'CH_' : 'GR_') + crypto.randomBytes(2).toString('hex').toUpperCase();
-  const chat = {
-    id, name: name.trim().slice(0, 50), type,
-    creator: req.code,
+  const chat = { id, name: name.trim().slice(0, 50), type, creator: req.code,
     members: type === 'group' ? Array.from(new Set([req.code, ...(members||[])])) : [],
     avatar: (avatar && avatar.startsWith('data:image/') && avatar.length < 80000) ? avatar : null,
-    createdAt: Date.now()
-  };
+    createdAt: Date.now() };
   state.chats[id] = chat;
   saveState();
   broadcast({ type: 'chats_changed' });
@@ -257,8 +263,7 @@ app.post('/api/chats/:id/update', auth, (req, res) => {
     else if(typeof avatar === 'string' && avatar.startsWith('data:image/') && avatar.length < 80000) ch.avatar = avatar;
   }
   if(members && ch.type === 'group') ch.members = Array.from(new Set([ch.creator, ...members]));
-  saveState();
-  broadcast({ type: 'chats_changed' });
+  saveState(); broadcast({ type: 'chats_changed' });
   res.json({ ok: true, chat: ch });
 });
 
@@ -267,8 +272,7 @@ app.post('/api/chats/:id/leave', auth, (req, res) => {
   if(!ch || ch.type !== 'group') return res.json({ ok: false });
   if(ch.creator === req.code) return res.json({ ok: false, error: 'Создатель не может выйти' });
   ch.members = (ch.members || []).filter(c => c !== req.code);
-  saveState();
-  broadcast({ type: 'chats_changed' });
+  saveState(); broadcast({ type: 'chats_changed' });
   res.json({ ok: true });
 });
 
@@ -278,8 +282,7 @@ app.delete('/api/chats/:id', auth, (req, res) => {
   if(ch.creator !== req.code && !state.users[req.code]?.isAdmin) return res.json({ ok: false, error: 'Нет доступа' });
   delete state.chats[req.params.id];
   state.messages = state.messages.filter(m => m.to !== req.params.id);
-  saveState();
-  broadcast({ type: 'chats_changed' });
+  saveState(); broadcast({ type: 'chats_changed' });
   res.json({ ok: true });
 });
 
@@ -288,10 +291,6 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 3 * 1024 * 1024 });
 const clients = new Map();
 
-function isOnline(code){
-  for(const c of clients.values()) if(c === code) return true;
-  return false;
-}
 function broadcast(obj){
   const str = JSON.stringify(obj);
   for(const ws of clients.keys()) if(ws.readyState === 1) ws.send(str);
@@ -313,18 +312,10 @@ wss.on('connection', (ws) => {
       const { to, text, media, mediaType, duration } = msg;
       if(!to) return;
       if(media && (typeof media !== 'string' || media.length > 2000000)) return;
-
-      const m = {
-        id: crypto.randomBytes(8).toString('hex'),
-        from: code, to,
+      const m = { id: crypto.randomBytes(8).toString('hex'), from: code, to,
         text: text ? String(text).slice(0, 4000) : '',
-        media: media || null,
-        mediaType: mediaType || null,
-        duration: duration || 0,
-        type: media ? mediaType : 'text',
-        t: Date.now()
-      };
-
+        media: media || null, mediaType: mediaType || null, duration: duration || 0,
+        type: media ? mediaType : 'text', t: Date.now() };
       if(state.chats[to]){
         const ch = state.chats[to];
         if(ch.type === 'channel' && ch.creator !== code) return;
@@ -339,7 +330,6 @@ wss.on('connection', (ws) => {
         }
         return;
       }
-
       if(!state.users[to]) return;
       state.messages.push(m);
       if(state.messages.length > 20000) state.messages = state.messages.slice(-10000);
