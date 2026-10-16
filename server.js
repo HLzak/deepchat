@@ -31,11 +31,7 @@ const RANDOM_COLORS = ['#2AABEE','#7bc862','#e17076','#65aadd','#a695e7','#ee7aa
 
 let state = { users:{}, messages:[], sessions:{}, codes:{}, chats:{}, gifts:[], posts:[] };
 
-function generatePhone(){
-  let n = '';
-  for(let i=0;i<8;i++) n += Math.floor(Math.random()*10);
-  return '+888 ' + n.slice(0,4) + ' ' + n.slice(4,8);
-}
+function generatePhone(){ let n=''; for(let i=0;i<8;i++) n+=Math.floor(Math.random()*10); return '+888 '+n.slice(0,4)+' '+n.slice(4,8); }
 
 function ensureUser(code){
   if(state.users[code]) return state.users[code];
@@ -46,9 +42,9 @@ function ensureUser(code){
   state.users[code] = {
     code, name: c.name || 'Пользователь', username: un,
     color: c.color || RANDOM_COLORS[Math.floor(Math.random()*RANDOM_COLORS.length)],
-    avatar: null, phone: generatePhone(),
+    avatar: null, banner: null, phone: generatePhone(),
     isAdmin: !!c.isAdmin, stars: c.isAdmin ? 'inf' : 0,
-    createdAt: Date.now(), lastSeen: 0
+    blocked: [], createdAt: Date.now(), lastSeen: 0
   };
   return state.users[code];
 }
@@ -66,6 +62,10 @@ function loadState(){
   if(!state.gifts) state.gifts = [];
   if(!state.posts) state.posts = [];
   for(const code of Object.keys(state.codes)) ensureUser(code);
+  for(const u of Object.values(state.users)){
+    if(u.banner === undefined) u.banner = null;
+    if(!u.blocked) u.blocked = [];
+  }
   saveState();
 }
 function saveState(){ try { fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2)); } catch(e){} }
@@ -96,15 +96,27 @@ function auth(req, res, next){
 }
 
 function isOnline(code){ for(const c of clients.values()) if(c === code) return true; return false; }
-function myChats(code){
-  return Object.values(state.chats).filter(c => c.type === 'channel' || c.creator === code || (c.members || []).includes(code));
+function myChats(code){ return Object.values(state.chats).filter(c => c.type === 'channel' || c.creator === code || (c.members || []).includes(code)); }
+
+// Скрываем звёзды для тех, кто не админ и не сам пользователь
+function publicUser(u, viewer){
+  const isSelf = viewer === u.code;
+  const isAdmin = state.users[viewer] && state.users[viewer].isAdmin;
+  const showStars = isSelf || isAdmin;
+  return {
+    code:u.code, name:u.name, username:u.username, color:u.color,
+    avatar:u.avatar, banner:u.banner, isAdmin:u.isAdmin, phone:u.phone,
+    stars: showStars ? u.stars : null,
+    showStars: showStars,
+    online:isOnline(u.code), lastSeen:u.lastSeen,
+    blockedByMe: (state.users[viewer] && state.users[viewer].blocked || []).includes(u.code),
+    blockedMe: (u.blocked || []).includes(viewer)
+  };
 }
 
 app.get('/api/users', auth, (req, res) => {
-  const list = Object.values(state.users).map(u => ({
-    code:u.code, name:u.name, username:u.username, color:u.color, avatar:u.avatar,
-    isAdmin:u.isAdmin, phone:u.phone, stars:u.stars, online:isOnline(u.code), lastSeen:u.lastSeen
-  }));
+  const viewer = req.code;
+  const list = Object.values(state.users).map(u => publicUser(u, viewer));
   const stories = state.posts.filter(p => p.media).slice(-40).reverse().map(p => {
     const a = state.users[p.author];
     return {
@@ -113,7 +125,11 @@ app.get('/api/users', auth, (req, res) => {
       media:p.media, mediaType:p.mediaType, t:p.t
     };
   });
-  res.json({ ok:true, users:list, me:state.users[req.code], chats:myChats(req.code), gifts:GIFTS, stories });
+  res.json({
+    ok:true, users:list,
+    me: publicUser(state.users[viewer], viewer),
+    chats: myChats(viewer), gifts: GIFTS, stories
+  });
 });
 
 app.get('/api/messages/:withId', auth, (req, res) => {
@@ -131,12 +147,16 @@ app.get('/api/messages/:withId', auth, (req, res) => {
 app.post('/api/profile', auth, (req, res) => {
   const u = state.users[req.code];
   if(!u) return res.status(404).json({ ok:false });
-  const { name, color, username, avatar } = req.body || {};
+  const { name, color, username, avatar, banner } = req.body || {};
   if(name && String(name).trim().length > 0 && name.length <= 40) u.name = String(name).trim();
   if(color && /^#[0-9a-f]{6}$/i.test(color)) u.color = color;
   if(avatar !== undefined){
     if(avatar === null) u.avatar = null;
     else if(typeof avatar === 'string' && avatar.indexOf('data:image/') === 0 && avatar.length < 80000) u.avatar = avatar;
+  }
+  if(banner !== undefined){
+    if(banner === null) u.banner = null;
+    else if(typeof banner === 'string' && banner.indexOf('data:image/') === 0 && banner.length < 150000) u.banner = banner;
   }
   if(username && /^[a-zA-Z0-9_]{3,20}$/.test(username)){
     const exists = Object.values(state.users).some(x => x.code !== req.code && x.username === username);
@@ -144,8 +164,9 @@ app.post('/api/profile', auth, (req, res) => {
     u.username = username;
   }
   saveState();
-  broadcast({ type:'user_update', user:u });
-  res.json({ ok:true, user:u });
+  broadcast({ type:'user_update', user: publicUser(u, u.code) });
+  broadcast({ type:'user_update_public', user: publicUser(u, '') });
+  res.json({ ok:true, user: publicUser(u, req.code) });
 });
 
 app.post('/api/logout', auth, (req, res) => {
@@ -154,6 +175,51 @@ app.post('/api/logout', auth, (req, res) => {
   res.json({ ok:true });
 });
 
+// === Блокировка ===
+app.post('/api/block', auth, (req, res) => {
+  const me = state.users[req.code];
+  const { code, blocked } = req.body || {};
+  if(!me || !state.users[code]) return res.json({ ok:false });
+  me.blocked = me.blocked || [];
+  const idx = me.blocked.indexOf(code);
+  if(blocked && idx < 0) me.blocked.push(code);
+  if(!blocked && idx >= 0) me.blocked.splice(idx, 1);
+  saveState();
+  res.json({ ok:true, blocked: me.blocked });
+});
+
+// === Редактирование сообщения ===
+app.post('/api/messages/:id/edit', auth, (req, res) => {
+  const m = state.messages.find(x => x.id === req.params.id);
+  if(!m) return res.json({ ok:false });
+  if(m.from !== req.code) return res.json({ ok:false, error:'Только автор' });
+  const { text } = req.body || {};
+  if(!text || !String(text).trim()) return res.json({ ok:false });
+  m.text = String(text).slice(0, 4000);
+  m.edited = true;
+  m.editT = Date.now();
+  saveState();
+  const payload = JSON.stringify({ type:'message_edit', message: m });
+  for(const [ws2, c2] of clients.entries()){
+    if((c2 === m.from || c2 === m.to) && ws2.readyState === 1) ws2.send(payload);
+  }
+  res.json({ ok:true, message: m });
+});
+
+app.post('/api/messages/:id/delete', auth, (req, res) => {
+  const m = state.messages.find(x => x.id === req.params.id);
+  if(!m) return res.json({ ok:false });
+  if(m.from !== req.code && !state.users[req.code]?.isAdmin) return res.json({ ok:false, error:'Нет доступа' });
+  state.messages = state.messages.filter(x => x.id !== req.params.id);
+  saveState();
+  const payload = JSON.stringify({ type:'message_delete', id: m.id, from: m.from, to: m.to });
+  for(const [ws2, c2] of clients.entries()){
+    if((c2 === m.from || c2 === m.to) && ws2.readyState === 1) ws2.send(payload);
+  }
+  res.json({ ok:true });
+});
+
+// === Подарки ===
 app.post('/api/gifts/send', auth, (req, res) => {
   const { to, giftId } = req.body || {};
   const from = state.users[req.code], toUser = state.users[to];
@@ -169,9 +235,9 @@ app.post('/api/gifts/send', auth, (req, res) => {
   for(const [ws2, c2] of clients.entries()){
     if((c2 === req.code || c2 === to) && ws2.readyState === 1) ws2.send(payload);
   }
-  broadcast({ type:'user_update', user:from });
-  broadcast({ type:'user_update', user:toUser });
-  res.json({ ok:true, user:from });
+  broadcast({ type:'user_update', user: publicUser(from, from.code) });
+  broadcast({ type:'user_update_public', user: publicUser(from, '') });
+  res.json({ ok:true, user: publicUser(from, req.code) });
 });
 
 app.get('/api/gifts/:code', auth, (req, res) => {
@@ -185,6 +251,7 @@ app.get('/api/gifts/:code', auth, (req, res) => {
   res.json({ ok:true, gifts });
 });
 
+// === Посты ===
 app.get('/api/posts/:code', auth, (req, res) => {
   const posts = state.posts.filter(p => p.author === req.params.code).slice(-100).reverse();
   res.json({ ok:true, posts });
@@ -228,6 +295,7 @@ app.post('/api/posts/:id/like', auth, (req, res) => {
   res.json({ ok:true, post:p });
 });
 
+// === Чаты ===
 app.post('/api/chats', auth, (req, res) => {
   const { type, name, avatar, members } = req.body || {};
   if(!name || !name.trim()) return res.json({ ok:false, error:'Введите название' });
@@ -282,10 +350,12 @@ app.delete('/api/chats/:id', auth, (req, res) => {
   res.json({ ok:true });
 });
 
+// === Админ ===
 app.get('/api/admin/codes', auth, (req, res) => {
   if(!state.users[req.code]?.isAdmin) return res.status(403).json({ ok:false });
   res.json({
-    ok:true, codes:state.codes, users:state.users,
+    ok:true, codes:state.codes,
+    users: Object.fromEntries(Object.entries(state.users).map(([k,v]) => [k, Object.assign({}, v, { stars: v.stars })])),
     messageCount:state.messages.length, chats:Object.values(state.chats),
     giftsCount:state.gifts.length
   });
@@ -333,8 +403,9 @@ app.post('/api/admin/stars', auth, (req, res) => {
   if(!u) return res.json({ ok:false });
   u.stars = Math.max(0, (u.stars === 'inf' ? 0 : u.stars) + Number(amount || 0));
   saveState();
-  broadcast({ type:'user_update', user:u });
-  res.json({ ok:true, user:u });
+  broadcast({ type:'user_update', user: publicUser(u, u.code) });
+  broadcast({ type:'user_update_public', user: publicUser(u, '') });
+  res.json({ ok:true, user: publicUser(u, req.code) });
 });
 
 app.post('/api/admin/clear', auth, (req, res) => {
@@ -368,6 +439,11 @@ wss.on('connection', (ws) => {
     if(msg.type === 'send'){
       const { to, text, media, mediaType, duration } = msg;
       if(!to) return;
+      // Проверка блокировки
+      const sender = state.users[code];
+      const receiver = state.users[to];
+      if(receiver && (receiver.blocked || []).includes(code)) return res && res.json({ ok:false });
+      if(sender && (sender.blocked || []).includes(to)) return;
       if(media && (typeof media !== 'string' || media.length > 3500000)) return;
       const m = {
         id: crypto.randomBytes(8).toString('hex'), from: code, to,
