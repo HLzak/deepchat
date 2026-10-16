@@ -7,6 +7,7 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'deepchat-data.json');
+const GIFT_COMMISSION = 0.30; // 30% комиссия при обмене
 
 const DEFAULT_CODES = {
   'DEEP-DEV-9K2X-7M3P': { name: 'Разработчик', isAdmin: true, color: '#2AABEE', username: 'admin' },
@@ -85,7 +86,7 @@ app.post('/api/login', (req, res) => {
   const u = ensureUser(code);
   u.lastSeen = Date.now();
   saveState();
-  res.json({ ok:true, token, user:u, gifts:GIFTS });
+  res.json({ ok:true, token, user:u, gifts:GIFTS, commission: GIFT_COMMISSION });
 });
 
 function auth(req, res, next){
@@ -98,18 +99,20 @@ function auth(req, res, next){
 function isOnline(code){ for(const c of clients.values()) if(c === code) return true; return false; }
 function myChats(code){ return Object.values(state.chats).filter(c => c.type === 'channel' || c.creator === code || (c.members || []).includes(code)); }
 
-// Скрываем звёзды для тех, кто не админ и не сам пользователь
 function publicUser(u, viewer){
   const isSelf = viewer === u.code;
-  const isAdmin = state.users[viewer] && state.users[viewer].isAdmin;
-  const showStars = isSelf || isAdmin;
+  const viewerUser = viewer ? state.users[viewer] : null;
+  const isAdmin = viewerUser && viewerUser.isAdmin;
+  const showPrivate = isSelf || isAdmin;
   return {
-    code:u.code, name:u.name, username:u.username, color:u.color,
+    code: showPrivate ? u.code : null,
+    codeHidden: !showPrivate,
+    name:u.name, username:u.username, color:u.color,
     avatar:u.avatar, banner:u.banner, isAdmin:u.isAdmin, phone:u.phone,
-    stars: showStars ? u.stars : null,
-    showStars: showStars,
+    stars: showPrivate ? u.stars : null,
+    showStars: showPrivate,
     online:isOnline(u.code), lastSeen:u.lastSeen,
-    blockedByMe: (state.users[viewer] && state.users[viewer].blocked || []).includes(u.code),
+    blockedByMe: (viewerUser && (viewerUser.blocked || []) || []).includes(u.code),
     blockedMe: (u.blocked || []).includes(viewer)
   };
 }
@@ -128,7 +131,7 @@ app.get('/api/users', auth, (req, res) => {
   res.json({
     ok:true, users:list,
     me: publicUser(state.users[viewer], viewer),
-    chats: myChats(viewer), gifts: GIFTS, stories
+    chats: myChats(viewer), gifts: GIFTS, stories, commission: GIFT_COMMISSION
   });
 });
 
@@ -175,7 +178,6 @@ app.post('/api/logout', auth, (req, res) => {
   res.json({ ok:true });
 });
 
-// === Блокировка ===
 app.post('/api/block', auth, (req, res) => {
   const me = state.users[req.code];
   const { code, blocked } = req.body || {};
@@ -188,7 +190,6 @@ app.post('/api/block', auth, (req, res) => {
   res.json({ ok:true, blocked: me.blocked });
 });
 
-// === Редактирование сообщения ===
 app.post('/api/messages/:id/edit', auth, (req, res) => {
   const m = state.messages.find(x => x.id === req.params.id);
   if(!m) return res.json({ ok:false });
@@ -219,7 +220,6 @@ app.post('/api/messages/:id/delete', auth, (req, res) => {
   res.json({ ok:true });
 });
 
-// === Подарки ===
 app.post('/api/gifts/send', auth, (req, res) => {
   const { to, giftId } = req.body || {};
   const from = state.users[req.code], toUser = state.users[to];
@@ -240,6 +240,39 @@ app.post('/api/gifts/send', auth, (req, res) => {
   res.json({ ok:true, user: publicUser(from, req.code) });
 });
 
+// === ОБМЕН ПОДАРКОВ НА ЗВЁЗДЫ ===
+app.post('/api/gifts/exchange', auth, (req, res) => {
+  const { giftInstanceId, count } = req.body || {};
+  const me = state.users[req.code];
+  if(!me) return res.json({ ok:false });
+
+  // Находим все подарки пользователя с этим giftId
+  let candidates;
+  if(giftInstanceId){
+    candidates = state.gifts.filter(g => g.id === giftInstanceId && g.to === req.code);
+  } else {
+    return res.json({ ok:false, error:'Не указан подарок' });
+  }
+  if(!candidates.length) return res.json({ ok:false, error:'Подарок не найден' });
+
+  const gift = candidates[0];
+  const giftDef = GIFTS.find(x => x.id === gift.giftId);
+  if(!giftDef) return res.json({ ok:false });
+
+  const returnAmount = Math.floor(giftDef.price * (1 - GIFT_COMMISSION));
+
+  // Удаляем подарок
+  state.gifts = state.gifts.filter(g => g.id !== gift.id);
+
+  // Начисляем звёзды
+  if(me.stars !== 'inf') me.stars = (me.stars || 0) + returnAmount;
+
+  saveState();
+  broadcast({ type:'user_update', user: publicUser(me, me.code) });
+  broadcast({ type:'user_update_public', user: publicUser(me, '') });
+  res.json({ ok:true, returned: returnAmount, user: publicUser(me, req.code) });
+});
+
 app.get('/api/gifts/:code', auth, (req, res) => {
   const gifts = state.gifts.filter(g => g.to === req.params.code).map(g => {
     const fu = state.users[g.from];
@@ -248,10 +281,9 @@ app.get('/api/gifts/:code', auth, (req, res) => {
       fromUser: fu ? { code:fu.code, name:fu.name, username:fu.username, avatar:fu.avatar, color:fu.color } : null
     });
   });
-  res.json({ ok:true, gifts });
+  res.json({ ok:true, gifts, commission: GIFT_COMMISSION });
 });
 
-// === Посты ===
 app.get('/api/posts/:code', auth, (req, res) => {
   const posts = state.posts.filter(p => p.author === req.params.code).slice(-100).reverse();
   res.json({ ok:true, posts });
@@ -295,7 +327,6 @@ app.post('/api/posts/:id/like', auth, (req, res) => {
   res.json({ ok:true, post:p });
 });
 
-// === Чаты ===
 app.post('/api/chats', auth, (req, res) => {
   const { type, name, avatar, members } = req.body || {};
   if(!name || !name.trim()) return res.json({ ok:false, error:'Введите название' });
@@ -350,12 +381,11 @@ app.delete('/api/chats/:id', auth, (req, res) => {
   res.json({ ok:true });
 });
 
-// === Админ ===
 app.get('/api/admin/codes', auth, (req, res) => {
   if(!state.users[req.code]?.isAdmin) return res.status(403).json({ ok:false });
   res.json({
     ok:true, codes:state.codes,
-    users: Object.fromEntries(Object.entries(state.users).map(([k,v]) => [k, Object.assign({}, v, { stars: v.stars })])),
+    users: Object.fromEntries(Object.entries(state.users).map(([k,v]) => [k, Object.assign({}, v)])),
     messageCount:state.messages.length, chats:Object.values(state.chats),
     giftsCount:state.gifts.length
   });
@@ -439,10 +469,9 @@ wss.on('connection', (ws) => {
     if(msg.type === 'send'){
       const { to, text, media, mediaType, duration } = msg;
       if(!to) return;
-      // Проверка блокировки
       const sender = state.users[code];
       const receiver = state.users[to];
-      if(receiver && (receiver.blocked || []).includes(code)) return res && res.json({ ok:false });
+      if(receiver && (receiver.blocked || []).includes(code)) return;
       if(sender && (sender.blocked || []).includes(to)) return;
       if(media && (typeof media !== 'string' || media.length > 3500000)) return;
       const m = {
